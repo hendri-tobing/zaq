@@ -30,6 +30,7 @@ defmodule Zaq.Engine.Api do
   alias Zaq.Engine.IncomingMessageRouting
   alias Zaq.Engine.Messages.Incoming
   alias Zaq.Engine.Notifications
+  alias Zaq.Engine.Notifications.NotificationLog
   alias Zaq.Engine.OutboundHttp
   alias Zaq.Engine.PeopleAuthGateway
   alias Zaq.Engine.PeopleConversations
@@ -1161,6 +1162,26 @@ defmodule Zaq.Engine.Api do
     %{event | response: response}
   end
 
+  def handle_event(%Event{} = event, :notification_logs, _context) do
+    response =
+      if Keyword.get(event.opts, :confidential) == true do
+        handle_notification_logs_request(event.request)
+      else
+        {:error, :confidential_event_required}
+      end
+
+    %{event | response: response}
+  end
+
+  def handle_event(%Event{} = event, :channel_config, _context) do
+    response =
+      if Keyword.get(event.opts, :confidential) == true,
+        do: handle_channel_config_request(event.request),
+        else: {:error, :confidential_event_required}
+
+    %{event | response: response}
+  end
+
   def handle_event(%Event{} = event, action, _context) do
     %{event | response: {:error, {:unsupported_action, action}}}
   end
@@ -1502,4 +1523,73 @@ defmodule Zaq.Engine.Api do
   defp authenticated_user_id(%{user_id: user_id}) when not is_nil(user_id), do: {:ok, user_id}
   defp authenticated_user_id(%{"user_id" => user_id}) when not is_nil(user_id), do: {:ok, user_id}
   defp authenticated_user_id(_actor), do: {:error, :unauthorized}
+
+  defp handle_notification_logs_request(%{action: :list, opts: opts}) when is_list(opts),
+    do: NotificationLog.list_logs(opts)
+
+  defp handle_notification_logs_request(%{action: :get, id: id}),
+    do: NotificationLog.get_log(id)
+
+  defp handle_notification_logs_request(other),
+    do: {:error, {:invalid_request, other}}
+
+  defp handle_channel_config_request(%{action: :get, id: id}),
+    do: ChannelConfig.get(id)
+
+  defp handle_channel_config_request(%{action: :get!, id: id}),
+    do: ChannelConfig.get!(id)
+
+  defp handle_channel_config_request(%{action: :get_by_provider, provider: provider})
+       when is_binary(provider),
+       do: ChannelConfig.get_by_provider(provider)
+
+  defp handle_channel_config_request(%{
+         action: :get_by_channel_id,
+         provider: provider,
+         channel_id: channel_id
+       })
+       when is_binary(provider),
+       do: ChannelConfig.get_by_channel_id(provider, channel_id)
+
+  defp handle_channel_config_request(%{
+         action: :get_provider_agent_choice,
+         config: %ChannelConfig{} = config
+       }),
+       do: ChannelConfig.get_provider_agent_choice(config)
+
+  defp handle_channel_config_request(%{action: :list_by_provider, provider: provider})
+       when is_binary(provider),
+       do: ChannelConfig.list_by_provider(provider)
+
+  defp handle_channel_config_request(%{action: :list_by_provider_named, provider: provider} = req)
+       when is_binary(provider),
+       do: ChannelConfig.list_by_provider_named(provider, Map.get(req, :kind))
+
+  defp handle_channel_config_request(%{action: :list_enabled_data_sources}),
+    do: ChannelConfig.list_enabled_data_source_configs()
+
+  defp handle_channel_config_request(%{action: :data_source_config_enabled?}),
+    do: ChannelConfig.data_source_config_enabled?()
+
+  defp handle_channel_config_request(%{action: :enabled_counts_by_provider}),
+    do: ChannelConfig.enabled_counts_by_provider()
+
+  defp handle_channel_config_request(%{action: :enabled_providers_by_kind, kind: kind})
+       when is_binary(kind),
+       do: ChannelConfig.enabled_providers_by_kind(kind)
+
+  defp handle_channel_config_request(%{
+         action: :persist,
+         modal: modal,
+         config: %ChannelConfig{} = config,
+         params: params
+       })
+       when modal in [:new, :edit] and is_map(params),
+       do: ChannelConfig.persist(modal, config, params)
+
+  defp handle_channel_config_request(%{action: :toggle_enabled!, config: %ChannelConfig{} = cfg}),
+    do: ChannelConfig.toggle_enabled!(cfg)
+
+  defp handle_channel_config_request(other),
+    do: {:error, {:invalid_request, other}}
 end

@@ -5,15 +5,12 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsIndexLive do
   on_mount {ZaqWeb.Live.BO.Communication.ServiceGate, [:channels]}
 
   alias Zaq.Channels.ProviderCatalog, as: ChannelProvider
-  alias Zaq.Engine.ChannelConfig
   alias Zaq.Event
   alias Zaq.NodeRouter
-  alias Zaq.Repo
   alias ZaqWeb.Components.DesignSystem.CardShell
   alias ZaqWeb.Components.DesignSystem.Table
   alias ZaqWeb.Live.BO.Communication.IngressStatusUI
-
-  import Ecto.Query
+  alias ZaqWeb.Live.BO.EngineDispatch
 
   @pending_ingress_status_retry_ms 200
   @pending_ingress_status_max_attempts 25
@@ -357,12 +354,11 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsIndexLive do
     all_providers = @retrieval_providers ++ @data_source_providers ++ @notification_providers
 
     counts =
-      ChannelConfig
-      |> where([c], c.enabled == true)
-      |> group_by([c], c.provider)
-      |> select([c], {c.provider, count(c.id)})
-      |> Repo.all()
-      |> Map.new()
+      EngineDispatch.dispatch(
+        :channel_config,
+        %{action: :enabled_counts_by_provider},
+        confidential: true
+      )
 
     Enum.reduce(all_providers, %{}, fn provider, acc ->
       Map.put(acc, String.to_atom(provider), Map.get(counts, provider, 0))
@@ -374,7 +370,13 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsIndexLive do
     providers = ingress_status_providers(configured_providers)
 
     Enum.reduce(providers, %{}, fn provider, acc ->
-      configs = provider |> ChannelConfig.list_by_provider() |> Enum.filter(& &1.enabled)
+      configs =
+        :channel_config
+        |> EngineDispatch.dispatch(
+          %{action: :list_by_provider, provider: provider},
+          confidential: true
+        )
+        |> Enum.filter(& &1.enabled)
 
       statuses = IngressStatusUI.collect(configs, &fetch_ingress_status/1)
 
@@ -433,10 +435,11 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsIndexLive do
   end
 
   defp configured_retrieval_providers do
-    ChannelConfig
-    |> where([c], c.kind == "retrieval" and c.enabled == true)
-    |> select([c], c.provider)
-    |> Repo.all()
+    :channel_config
+    |> EngineDispatch.dispatch(
+      %{action: :enabled_providers_by_kind, kind: "retrieval"},
+      confidential: true
+    )
     |> MapSet.new()
   end
 

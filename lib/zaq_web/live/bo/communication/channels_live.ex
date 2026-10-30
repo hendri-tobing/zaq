@@ -10,10 +10,8 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
   alias Zaq.Channels.RetrievalChannel, as: RetChannel
   alias Zaq.Engine.ChannelConfig
   alias Zaq.Engine.Connect.Credential
-  alias Zaq.Engine.IncomingMessageRouting
   alias Zaq.Event
   alias Zaq.NodeRouter
-  alias Zaq.Repo
   alias Zaq.RuntimeDeps
   alias Zaq.Types.EncryptedString
   alias Zaq.Utils.ParseUtils
@@ -27,8 +25,6 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
   alias ZaqWeb.Live.BO.Communication.OAuthClaimState
   alias ZaqWeb.Live.BO.Communication.OAuthPopupUI
   alias ZaqWeb.Live.BO.EngineDispatch
-
-  import Ecto.Query
 
   @pending_ingress_status_retry_ms 200
   @pending_ingress_status_max_attempts 25
@@ -185,7 +181,7 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
   end
 
   def handle_event("open_modal", %{"action" => "edit", "id" => id}, socket) do
-    config = Repo.get!(ChannelConfig, id)
+    config = dispatch_channel_config(%{action: :get!, id: id})
     changeset = config |> ChannelConfig.changeset(%{}) |> with_visible_token()
 
     {:noreply,
@@ -444,7 +440,7 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
   end
 
   def handle_event("toggle_enabled", %{"id" => id}, socket) do
-    previous_config = Repo.get!(ChannelConfig, id)
+    previous_config = dispatch_channel_config(%{action: :get!, id: id})
 
     if previous_config.archived_at do
       {:noreply, put_flash(socket, :error, "Archived connectors cannot be reactivated.")}
@@ -460,7 +456,7 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
       ) do
     with {:ok, id} <- ParseUtils.parse_int_strict(config_id),
          true <- id == selected_id(socket),
-         %ChannelConfig{} = config <- Repo.get(ChannelConfig, id),
+         %ChannelConfig{} = config <- dispatch_channel_config(%{action: :get, id: id}),
          true <- config.provider == socket.assigns.provider,
          {:ok, configured_agent_id} <- AgentRouting.validate_choice(raw_id),
          {:ok, _result} <-
@@ -488,7 +484,8 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
         socket
       ) do
     with {:ok, rc_id} <- ParseUtils.parse_int_strict(id),
-         %RetChannel{} = retrieval_channel <- Repo.get(RetChannel, rc_id),
+         %RetChannel{} = retrieval_channel <-
+           dispatch_retrieval_channel(%{action: :get, id: rc_id}),
          {:ok, configured_agent_id} <- AgentRouting.validate_choice(raw_id),
          {:ok, _updated} <-
            upsert_incoming_routing_rule(
@@ -511,7 +508,7 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
   # -------------------------------------------------------------------------
 
   def handle_event("open_test", %{"id" => id}, socket) do
-    config = Repo.get!(ChannelConfig, id)
+    config = dispatch_channel_config(%{action: :get!, id: id})
 
     {:noreply,
      socket
@@ -729,11 +726,8 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
   end
 
   def handle_event("toggle_channel_active", %{"id" => id}, socket) do
-    rc = Repo.get!(RetChannel, id)
-
-    rc
-    |> Ecto.Changeset.change(active: !rc.active)
-    |> Repo.update!()
+    rc = dispatch_retrieval_channel(%{action: :get!, id: id})
+    dispatch_retrieval_channel(%{action: :toggle_active!, channel: rc})
 
     config = first_enabled_config(socket)
     sync_result = sync_provider_runtime(config)
@@ -757,8 +751,8 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
 
   def handle_event("remove_channel", _params, socket) do
     id = socket.assigns.confirm_remove_channel
-    rc = Repo.get!(RetChannel, id)
-    Repo.delete!(rc)
+    rc = dispatch_retrieval_channel(%{action: :get!, id: id})
+    dispatch_retrieval_channel(%{action: :delete!, channel: rc})
 
     config = first_enabled_config(socket)
     sync_result = sync_provider_runtime(config)
@@ -825,10 +819,14 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
   end
 
   defp do_fetch_posts(channel_id, cursor_opts) do
-    case ChannelConfig.get_by_channel_id("mattermost", channel_id) ||
-           ChannelConfig.get_by_provider("mattermost") do
-      nil -> {:error, [], nil, nil}
+    case dispatch_channel_config(%{
+           action: :get_by_channel_id,
+           provider: "mattermost",
+           channel_id: channel_id
+         }) ||
+           dispatch_channel_config(%{action: :get_by_provider, provider: "mattermost"}) do
       %ChannelConfig{} = cfg -> fetch_posts_from_config(cfg, channel_id, cursor_opts)
+      _ -> {:error, [], nil, nil}
     end
   end
 
@@ -899,17 +897,11 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
   end
 
   defp list_configs(provider) do
-    ChannelConfig
-    |> where([c], c.provider == ^provider and is_nil(c.archived_at))
-    |> order_by(asc: :name)
-    |> Repo.all()
+    dispatch_channel_config(%{action: :list_by_provider_named, provider: provider})
   end
 
   defp toggle_active_config(socket, previous_config) do
-    config =
-      previous_config
-      |> Ecto.Changeset.change(enabled: !previous_config.enabled)
-      |> Repo.update!()
+    config = dispatch_channel_config(%{action: :toggle_enabled!, config: previous_config})
 
     sync_result = sync_channel_runtime(previous_config, config)
     configs = list_configs(socket.assigns.provider)
@@ -957,16 +949,19 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
   defp load_retrieval_channels(nil), do: []
 
   defp load_retrieval_channels(%ChannelConfig{} = config) do
-    RetChannel.list_by_config(config.id)
+    case dispatch_retrieval_channel(%{action: :list_by_config, config_id: config.id}) do
+      channels when is_list(channels) -> channels
+      _ -> []
+    end
   end
 
   defp provider_default_agent_value(nil), do: ""
 
-  defp provider_default_agent_value(%ChannelConfig{} = config),
-    do:
-      config
-      |> ChannelConfig.get_provider_agent_choice()
-      |> AgentRouting.select_value()
+  defp provider_default_agent_value(%ChannelConfig{} = config) do
+    %{action: :get_provider_agent_choice, config: config}
+    |> dispatch_channel_config()
+    |> AgentRouting.select_value()
+  end
 
   defp provider_rule(%ChannelConfig{} = config, configured_agent_id),
     do: AgentRouting.rule_attrs(%{channel_config_id: config.id}, configured_agent_id)
@@ -985,19 +980,10 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
     do: dispatch_engine(:upsert_incoming_message_routing_rules, %{rules: [rule]})
 
   def retrieval_channel_agent_value(%RetChannel{} = retrieval_channel) do
-    case IncomingMessageRouting.get_rule(%{
-           channel_config_id: retrieval_channel.channel_config_id,
-           retrieval_channel_id: retrieval_channel.id
-         }) do
-      %{routing_mode: :none} ->
-        AgentRouting.none_value()
-
-      %{routing_mode: :agent, configured_agent_id: configured_agent_id} ->
-        AgentRouting.select_value(configured_agent_id)
-
-      _ ->
-        ""
-    end
+    AgentRoutingOptions.scope_rule_value(%{
+      channel_config_id: retrieval_channel.channel_config_id,
+      retrieval_channel_id: retrieval_channel.id
+    })
   end
 
   defp fetch_and_assign_channels(socket, cfg, team_id) do
@@ -1025,7 +1011,7 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
   end
 
   defp insert_retrieval_channel(socket, cfg, attrs, ch_id, ch_name) do
-    case %RetChannel{} |> RetChannel.changeset(attrs) |> Repo.insert() do
+    case dispatch_retrieval_channel(%{action: :create, attrs: attrs}) do
       {:ok, _rc} ->
         sync_result = sync_provider_runtime(cfg)
 
@@ -1303,6 +1289,17 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
 
   defp dispatch_engine(action, request \\ %{}) do
     EngineDispatch.dispatch(action, request)
+  end
+
+  defp dispatch_channel_config(request) when is_map(request) do
+    EngineDispatch.dispatch_confidential(:channel_config, request)
+  end
+
+  defp dispatch_retrieval_channel(request) when is_map(request) do
+    request
+    |> Event.new(:channels, opts: [action: :retrieval_channel, confidential: true])
+    |> NodeRouter.dispatch()
+    |> Map.get(:response)
   end
 
   defp engine_connect_fetch_credential(id),

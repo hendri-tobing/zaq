@@ -160,6 +160,27 @@ defmodule ZaqWeb.Live.BO.AI.AIDiagnosticsLiveTest do
     assert has_element?(view, "span", "connected")
   end
 
+  test "renders dash fallback when ingestion service is unavailable", %{conn: conn} do
+    pid = Process.whereis(Zaq.Ingestion.Supervisor)
+
+    on_exit(fn ->
+      if pid && Process.whereis(Zaq.Ingestion.Supervisor) == nil do
+        Process.register(pid, Zaq.Ingestion.Supervisor)
+      end
+    end)
+
+    if pid, do: Process.unregister(Zaq.Ingestion.Supervisor)
+
+    try do
+      {:ok, _view, html} = live(conn, ~p"/bo/ai-diagnostics")
+      assert html =~ "—"
+    after
+      if pid && Process.whereis(Zaq.Ingestion.Supervisor) == nil do
+        Process.register(pid, Zaq.Ingestion.Supervisor)
+      end
+    end
+  end
+
   defp assert_diagnostic_error(view, message_fragment \\ nil) do
     assert has_element?(view, "span", "✗ error")
 

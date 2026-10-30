@@ -2312,6 +2312,32 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLiveTest do
     refute html =~ "Runtime sync returned unexpected result"
   end
 
+  test "falls back to empty retrieval channels when :retrieval_channel dispatch fails", %{
+    conn: conn
+  } do
+    _config = insert_channel_config(%{})
+    stub(Zaq.NodeRouterMock, :find_node, fn _sup -> :channels@localhost end)
+
+    pid = Process.whereis(Zaq.Channels.Supervisor)
+
+    on_exit(fn ->
+      if pid && Process.whereis(Zaq.Channels.Supervisor) == nil do
+        Process.register(pid, Zaq.Channels.Supervisor)
+      end
+    end)
+
+    if pid, do: Process.unregister(Zaq.Channels.Supervisor)
+
+    try do
+      {:ok, _view, html} = live(conn, ~p"/bo/channels/retrieval/mattermost")
+      assert html =~ "Mattermost Main"
+    after
+      if pid && Process.whereis(Zaq.Channels.Supervisor) == nil do
+        Process.register(pid, Zaq.Channels.Supervisor)
+      end
+    end
+  end
+
   defp insert_channel_config(attrs) do
     params =
       %{

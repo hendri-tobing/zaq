@@ -2,7 +2,7 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelConfigPersistence do
   @moduledoc false
 
   alias Zaq.Engine.ChannelConfig
-  alias Zaq.Repo
+  alias ZaqWeb.Live.BO.EngineDispatch
 
   @spec persist(:new | :edit, ChannelConfig.t() | nil, map(), String.t(), (Ecto.Changeset.t(),
                                                                            String.t() ->
@@ -17,6 +17,13 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelConfigPersistence do
       |> ChannelConfig.changeset(params)
       |> validate_fun.(provider)
 
-    if modal == :new, do: Repo.insert(changeset), else: Repo.update(changeset)
+    if changeset.valid? do
+      EngineDispatch.dispatch_confidential(
+        :channel_config,
+        %{action: :persist, modal: modal, config: base, params: params}
+      )
+    else
+      {:error, Map.put(changeset, :action, :validate)}
+    end
   end
 end

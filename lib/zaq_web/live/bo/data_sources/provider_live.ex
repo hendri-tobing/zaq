@@ -2,15 +2,12 @@ defmodule ZaqWeb.Live.BO.DataSources.ProviderLive do
   use ZaqWeb, :live_view
   on_mount {ZaqWeb.Live.BO.Communication.ServiceGate, [:channels]}
 
-  import Ecto.Query
-
   alias Zaq.Channels.{Bridge, DataSourceBridge}
   alias Zaq.Channels.ProviderCatalog
   alias Zaq.Engine.ChannelConfig
   alias Zaq.Engine.Connect.Credential
   alias Zaq.Event
   alias Zaq.NodeRouter
-  alias Zaq.Repo
   alias Zaq.Storage.VolumeConfig
   alias Zaq.Utils.ParseUtils
   alias Zaq.Utils.Scopes
@@ -187,7 +184,7 @@ defmodule ZaqWeb.Live.BO.DataSources.ProviderLive do
   end
 
   def handle_event("open_modal", %{"action" => "edit", "id" => id}, socket) do
-    config = Repo.get!(ChannelConfig, id)
+    config = dispatch_channel_config(%{action: :get!, id: id})
     changeset = ChannelConfig.changeset(config, %{})
 
     {:noreply,
@@ -291,7 +288,7 @@ defmodule ZaqWeb.Live.BO.DataSources.ProviderLive do
   end
 
   def handle_event("toggle_enabled", %{"id" => id}, socket) do
-    previous_config = Repo.get!(ChannelConfig, id)
+    previous_config = dispatch_channel_config(%{action: :get!, id: id})
 
     if previous_config.archived_at || previous_config.provider != socket.assigns.provider ||
          previous_config.kind != "data_source" do
@@ -367,7 +364,7 @@ defmodule ZaqWeb.Live.BO.DataSources.ProviderLive do
   end
 
   def handle_event("open_test", %{"id" => id}, socket) do
-    config = Repo.get!(ChannelConfig, id)
+    config = dispatch_channel_config(%{action: :get!, id: id})
 
     root_selector = root_selector_for_config(config, socket.assigns.provider)
     max_pages = max_pages_for_config(config)
@@ -399,7 +396,7 @@ defmodule ZaqWeb.Live.BO.DataSources.ProviderLive do
   end
 
   def handle_event("fetch_more", %{"id" => id}, socket) do
-    config = Repo.get!(ChannelConfig, id)
+    config = dispatch_channel_config(%{action: :get!, id: id})
     root_selector = root_selector_for_config(config, socket.assigns.provider)
     max_pages = max_pages_for_config(config)
 
@@ -554,10 +551,7 @@ defmodule ZaqWeb.Live.BO.DataSources.ProviderLive do
   end
 
   defp toggle_config_enabled(socket, previous_config) do
-    config =
-      previous_config
-      |> Ecto.Changeset.change(enabled: !previous_config.enabled)
-      |> Repo.update!()
+    config = dispatch_channel_config(%{action: :toggle_enabled!, config: previous_config})
 
     _sync = sync_channel_runtime(previous_config, config)
 
@@ -689,10 +683,15 @@ defmodule ZaqWeb.Live.BO.DataSources.ProviderLive do
   def oauth_claim_state_for_changeset(_), do: OAuthClaimState.for_changeset(nil)
 
   defp list_configs(provider) do
-    ChannelConfig
-    |> where([c], c.provider == ^provider and c.kind == "data_source" and is_nil(c.archived_at))
-    |> order_by(asc: :name)
-    |> Repo.all()
+    dispatch_channel_config(%{
+      action: :list_by_provider_named,
+      provider: provider,
+      kind: "data_source"
+    })
+  end
+
+  defp dispatch_channel_config(request) when is_map(request) do
+    EngineDispatch.dispatch_confidential(:channel_config, request)
   end
 
   defp grants_by_config(configs) do

@@ -5,9 +5,13 @@ defmodule ZaqWeb.Live.BO.EngineDispatch do
 
   alias Zaq.{Event, NodeRouter}
 
-  def dispatch(action, request \\ %{}) do
-    Event.new(request, :engine, opts: [action: action])
+  def dispatch(action, request \\ %{}, opts \\ []) when is_list(opts) do
+    Event.new(request, :engine, opts: Keyword.put(opts, :action, action))
     |> NodeRouter.dispatch()
     |> Map.get(:response)
+  end
+
+  def dispatch_confidential(action, request \\ %{}, opts \\ []) when is_list(opts) do
+    dispatch(action, request, Keyword.put(opts, :confidential, true))
   end
 end

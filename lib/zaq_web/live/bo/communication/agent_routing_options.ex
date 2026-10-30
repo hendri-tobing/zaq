@@ -7,8 +7,18 @@ defmodule ZaqWeb.Live.BO.Communication.AgentRoutingOptions do
   alias Zaq.Channels.AgentRouting
   alias Zaq.MapUtils
   alias Zaq.Utils.ParseUtils
+  alias ZaqWeb.Live.BO.EngineDispatch
 
   @none_value AgentRouting.none_value()
+
+  @doc "Fetches the incoming routing rule for `scope` via EngineDispatch and returns its select value."
+  @spec scope_rule_value(map()) :: String.t()
+  def scope_rule_value(scope) when is_map(scope) do
+    case EngineDispatch.dispatch(:get_incoming_message_routing_rules, %{scopes: [scope]}) do
+      {:ok, [%{rule: rule}]} -> AgentRouting.rule_select_value(rule)
+      _ -> ""
+    end
+  end
 
   @doc "Returns dropdown options with the centralized NONE choice prepended."
   @spec agent_options(module() | list()) :: [{String.t(), term()}]
