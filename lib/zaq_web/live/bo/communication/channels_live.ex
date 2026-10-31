@@ -50,11 +50,12 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
         _ -> "All Channels"
       end
 
-    configs = if(available, do: list_configs(provider), else: [])
+    {configs, configs_error} = if(available, do: fetch_configs(provider), else: {[], nil})
     first_config = selected_config(configs, nil)
 
     {:ok,
      socket
+     |> maybe_put_engine_error_flash(configs_error)
      |> assign(:page_title, label)
      |> assign(:current_path, back_path)
      |> assign(:back_path, back_path)
@@ -104,7 +105,7 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
      |> assign(:confirm_clear, false)
      |> assign(:clear_status, :idle)
      # --- retrieval channel picker ---
-     |> assign(:retrieval_channels, load_retrieval_channels(first_config))
+     |> assign_retrieval_channels(first_config)
      |> assign(:teams, [])
      |> assign(:teams_status, :idle)
      |> assign(:available_channels, [])
@@ -181,15 +182,21 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
   end
 
   def handle_event("open_modal", %{"action" => "edit", "id" => id}, socket) do
-    config = dispatch_channel_config(%{action: :get!, id: id})
-    changeset = config |> ChannelConfig.changeset(%{}) |> with_visible_token()
+    case dispatch_channel_config(%{action: :get!, id: id}) do
+      %ChannelConfig{} = config ->
+        changeset = config |> ChannelConfig.changeset(%{}) |> with_visible_token()
 
-    {:noreply,
-     socket
-     |> assign(:modal, :edit)
-     |> assign(:changeset, changeset)
-     |> assign(:form, to_form(changeset, as: :form))
-     |> assign(:modal_errors, [])}
+        {:noreply,
+         socket
+         |> assign(:modal, :edit)
+         |> assign(:changeset, changeset)
+         |> assign(:form, to_form(changeset, as: :form))
+         |> assign(:modal_errors, [])}
+
+      {:error, reason} ->
+        {:noreply,
+         put_flash(socket, :error, format_engine_error("Failed to load channel config", reason))}
+    end
   end
 
   def handle_event("close_modal", _params, socket) do
@@ -328,11 +335,12 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
           changeset
           |> maybe_validate_connect_credential_provider(provider)
           |> maybe_validate_global_base_url_requirement(socket.assigns.kind, provider)
-        end
+        end,
+        actor: BOActor.build(socket.assigns[:current_user])
       )
 
     case result do
-      {:ok, config} ->
+      {:ok, %ChannelConfig{} = config} ->
         sync_result = sync_channel_runtime(previous_config, config)
 
         configs = list_configs(socket.assigns.provider)
@@ -348,11 +356,11 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
          |> assign(:grants_by_config, grants_by_config(socket.assigns.kind, configs))
          |> assign(:provider_default_agent_value, provider_default_agent_value(first_config))
          |> assign(:selected_config_id, first_config && first_config.id)
-         |> assign(:retrieval_channels, load_retrieval_channels(first_config))
+         |> assign_retrieval_channels(first_config)
          |> schedule_ingress_status_refresh(configs)
          |> maybe_put_runtime_sync_flash(sync_result, "Channel config saved.")}
 
-      {:error, changeset} ->
+      {:error, %Ecto.Changeset{} = changeset} ->
         changeset = with_visible_token(changeset, raw_token)
 
         {:noreply,
@@ -360,6 +368,22 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
          |> assign(:changeset, changeset)
          |> assign(:form, to_form(changeset, as: :form))
          |> assign(:modal_errors, format_errors(changeset))}
+
+      {:error, reason} ->
+        changeset =
+          socket.assigns.changeset.data
+          |> ChannelConfig.changeset(params)
+          |> with_visible_token(raw_token)
+          |> Map.put(:action, :validate)
+
+        error_message = format_engine_error("Failed to save channel config", reason)
+
+        {:noreply,
+         socket
+         |> assign(:changeset, changeset)
+         |> assign(:form, to_form(changeset, as: :form))
+         |> assign(:modal_errors, [error_message])
+         |> put_flash(:error, error_message)}
     end
   end
 
@@ -405,7 +429,7 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
 
     event =
       Event.new(request, :engine,
-        actor: BOActor.build(socket.assigns.current_user),
+        actor: BOActor.build(socket.assigns[:current_user]),
         opts: [action: :archive_channel_connector, confidential: true]
       )
 
@@ -440,12 +464,16 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
   end
 
   def handle_event("toggle_enabled", %{"id" => id}, socket) do
-    previous_config = dispatch_channel_config(%{action: :get!, id: id})
+    case dispatch_channel_config(%{action: :get!, id: id}) do
+      %ChannelConfig{archived_at: archived_at} when not is_nil(archived_at) ->
+        {:noreply, put_flash(socket, :error, "Archived connectors cannot be reactivated.")}
 
-    if previous_config.archived_at do
-      {:noreply, put_flash(socket, :error, "Archived connectors cannot be reactivated.")}
-    else
-      toggle_active_config(socket, previous_config)
+      %ChannelConfig{} = previous_config ->
+        toggle_active_config(socket, previous_config)
+
+      {:error, reason} ->
+        {:noreply,
+         put_flash(socket, :error, format_engine_error("Failed to toggle connector", reason))}
     end
   end
 
@@ -495,7 +523,7 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
 
       {:noreply,
        socket
-       |> assign(:retrieval_channels, load_retrieval_channels(config))
+       |> assign_retrieval_channels(config)
        |> put_flash(:info, "Channel agent assignment updated.")}
     else
       _ ->
@@ -508,13 +536,18 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
   # -------------------------------------------------------------------------
 
   def handle_event("open_test", %{"id" => id}, socket) do
-    config = dispatch_channel_config(%{action: :get!, id: id})
+    case dispatch_channel_config(%{action: :get!, id: id}) do
+      %ChannelConfig{} = config ->
+        {:noreply,
+         socket
+         |> assign(:test_config, config)
+         |> assign(:test_status, :idle)
+         |> assign(:test_channel_id, "")}
 
-    {:noreply,
-     socket
-     |> assign(:test_config, config)
-     |> assign(:test_status, :idle)
-     |> assign(:test_channel_id, "")}
+      {:error, reason} ->
+        {:noreply,
+         put_flash(socket, :error, format_engine_error("Failed to load channel config", reason))}
+    end
   end
 
   def handle_event("close_test", _params, socket) do
@@ -632,7 +665,7 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
      socket
      |> assign(:selected_config_id, config && config.id)
      |> assign(:provider_default_agent_value, provider_default_agent_value(config))
-     |> assign(:retrieval_channels, load_retrieval_channels(config))
+     |> assign_retrieval_channels(config)
      |> assign(:teams, [])
      |> assign(:teams_status, :idle)
      |> assign(:available_channels, [])
@@ -734,7 +767,7 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
 
     {:noreply,
      socket
-     |> assign(:retrieval_channels, load_retrieval_channels(config))
+     |> assign_retrieval_channels(config)
      |> maybe_put_runtime_sync_flash(
        sync_result,
        "#{rc.channel_name} #{if rc.active, do: "paused", else: "activated"}."
@@ -760,7 +793,7 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
     {:noreply,
      socket
      |> assign(:confirm_remove_channel, nil)
-     |> assign(:retrieval_channels, load_retrieval_channels(config))
+     |> assign_retrieval_channels(config)
      |> maybe_put_runtime_sync_flash(sync_result, "#{rc.channel_name} removed.")}
   end
 
@@ -897,27 +930,44 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
   end
 
   defp list_configs(provider) do
-    dispatch_channel_config(%{action: :list_by_provider_named, provider: provider})
+    {configs, _error} = fetch_configs(provider)
+    configs
+  end
+
+  defp fetch_configs(provider) do
+    case dispatch_channel_config(%{action: :list_by_provider_named, provider: provider}) do
+      configs when is_list(configs) -> {configs, nil}
+      {:error, reason} -> {[], reason}
+      other -> {[], {:unexpected_response, other}}
+    end
   end
 
   defp toggle_active_config(socket, previous_config) do
-    config = dispatch_channel_config(%{action: :toggle_enabled!, config: previous_config})
+    case dispatch_channel_config(
+           %{action: :toggle_enabled!, config: previous_config},
+           actor: BOActor.build(socket.assigns[:current_user])
+         ) do
+      %ChannelConfig{} = config ->
+        sync_result = sync_channel_runtime(previous_config, config)
+        configs = list_configs(socket.assigns.provider)
+        selected = selected_config(configs, selected_id(socket))
 
-    sync_result = sync_channel_runtime(previous_config, config)
-    configs = list_configs(socket.assigns.provider)
-    selected = selected_config(configs, selected_id(socket))
+        {:noreply,
+         socket
+         |> assign(:configs, configs)
+         |> assign(:grants_by_config, grants_by_config(socket.assigns.kind, configs))
+         |> assign(:provider_default_agent_value, provider_default_agent_value(selected))
+         |> assign(:selected_config_id, selected && selected.id)
+         |> schedule_ingress_status_refresh(configs)
+         |> maybe_put_runtime_sync_flash(
+           sync_result,
+           "#{config.name} #{if previous_config.enabled, do: "disabled", else: "enabled"}."
+         )}
 
-    {:noreply,
-     socket
-     |> assign(:configs, configs)
-     |> assign(:grants_by_config, grants_by_config(socket.assigns.kind, configs))
-     |> assign(:provider_default_agent_value, provider_default_agent_value(selected))
-     |> assign(:selected_config_id, selected && selected.id)
-     |> schedule_ingress_status_refresh(configs)
-     |> maybe_put_runtime_sync_flash(
-       sync_result,
-       "#{config.name} #{if previous_config.enabled, do: "disabled", else: "enabled"}."
-     )}
+      {:error, reason} ->
+        {:noreply,
+         put_flash(socket, :error, format_engine_error("Failed to toggle connector", reason))}
+    end
   end
 
   defp first_enabled_config(socket) do
@@ -946,6 +996,17 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
     end
   end
 
+  defp assign_retrieval_channels(socket, config) do
+    retrieval_channels = load_retrieval_channels(config)
+
+    socket
+    |> assign(:retrieval_channels, retrieval_channels)
+    |> assign(
+      :retrieval_channel_agent_values,
+      load_retrieval_channel_agent_values(retrieval_channels)
+    )
+  end
+
   defp load_retrieval_channels(nil), do: []
 
   defp load_retrieval_channels(%ChannelConfig{} = config) do
@@ -955,12 +1016,30 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
     end
   end
 
+  defp load_retrieval_channel_agent_values([]), do: %{}
+
+  defp load_retrieval_channel_agent_values(retrieval_channels)
+       when is_list(retrieval_channels) do
+    scopes =
+      Enum.map(retrieval_channels, fn %RetChannel{} = rc ->
+        %{channel_config_id: rc.channel_config_id, retrieval_channel_id: rc.id}
+      end)
+
+    values_by_scope = AgentRoutingOptions.scope_rule_values(scopes)
+
+    Map.new(retrieval_channels, fn %RetChannel{} = rc ->
+      scope = %{channel_config_id: rc.channel_config_id, retrieval_channel_id: rc.id}
+      {rc.id, Map.get(values_by_scope, scope, "")}
+    end)
+  end
+
   defp provider_default_agent_value(nil), do: ""
 
   defp provider_default_agent_value(%ChannelConfig{} = config) do
-    %{action: :get_provider_agent_choice, config: config}
-    |> dispatch_channel_config()
-    |> AgentRouting.select_value()
+    case dispatch_channel_config(%{action: :get_provider_agent_choice, config: config}) do
+      {:error, _} -> ""
+      choice -> AgentRouting.select_value(choice)
+    end
   end
 
   defp provider_rule(%ChannelConfig{} = config, configured_agent_id),
@@ -978,6 +1057,14 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
 
   defp upsert_incoming_routing_rule(rule),
     do: dispatch_engine(:upsert_incoming_message_routing_rules, %{rules: [rule]})
+
+  def retrieval_channel_agent_value(values, %RetChannel{id: id}) when is_map(values) do
+    Map.get(values, id, "")
+  end
+
+  def retrieval_channel_agent_value(_values, %RetChannel{} = retrieval_channel) do
+    retrieval_channel_agent_value(retrieval_channel)
+  end
 
   def retrieval_channel_agent_value(%RetChannel{} = retrieval_channel) do
     AgentRoutingOptions.scope_rule_value(%{
@@ -1019,13 +1106,16 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
           Enum.reject(socket.assigns.available_channels, fn ch -> ch.id == ch_id end)
 
         socket
-        |> assign(:retrieval_channels, load_retrieval_channels(cfg))
+        |> assign_retrieval_channels(cfg)
         |> assign(:available_channels, available)
         |> maybe_put_runtime_sync_flash(sync_result, "#{ch_name} added as retrieval channel.")
 
-      {:error, changeset} ->
+      {:error, %Ecto.Changeset{} = changeset} ->
         errors = format_errors(changeset) |> Enum.join(", ")
         put_flash(socket, :error, "Failed to add channel: #{errors}")
+
+      {:error, reason} ->
+        put_flash(socket, :error, "Failed to add channel: #{inspect(reason)}")
     end
   end
 
@@ -1272,7 +1362,7 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
     |> assign(:grants_by_config, grants_by_config(socket.assigns.kind, configs))
     |> assign(:provider_default_agent_value, provider_default_agent_value(first_config))
     |> assign(:selected_config_id, first_config && first_config.id)
-    |> assign(:retrieval_channels, load_retrieval_channels(first_config))
+    |> assign_retrieval_channels(first_config)
     |> schedule_ingress_status_refresh(configs)
   end
 
@@ -1291,8 +1381,16 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
     EngineDispatch.dispatch(action, request)
   end
 
-  defp dispatch_channel_config(request) when is_map(request) do
-    EngineDispatch.dispatch_confidential(:channel_config, request)
+  defp dispatch_channel_config(request, opts \\ []) when is_map(request) and is_list(opts) do
+    EngineDispatch.dispatch_confidential(:channel_config, request, opts)
+  end
+
+  defp maybe_put_engine_error_flash(socket, reason) do
+    EngineDispatch.maybe_put_error_flash(socket, reason, "Failed to load channel configuration")
+  end
+
+  defp format_engine_error(prefix, reason) do
+    EngineDispatch.format_error(prefix, reason)
   end
 
   defp dispatch_retrieval_channel(request) when is_map(request) do
@@ -1373,22 +1471,33 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
   defp connect_credentials_for(:data_source, provider) do
     expected_provider = credential_provider_for(provider)
 
-    engine_connect_list_credentials()
-    |> Enum.filter(&(&1.provider == expected_provider))
+    case engine_connect_list_credentials() do
+      credentials when is_list(credentials) ->
+        Enum.filter(credentials, &(&1.provider == expected_provider))
+
+      _ ->
+        []
+    end
   end
 
   defp connect_credentials_for(_, _), do: []
 
-  defp grants_by_config(:data_source, configs) do
+  defp grants_by_config(:data_source, configs) when is_list(configs) do
     config_ids = Enum.map(configs, &to_string(&1.id))
 
-    engine_connect_list_grants(%{resource_type: "data_source", status: "active"})
-    |> Enum.filter(&(&1.resource_id in config_ids))
-    |> Enum.group_by(&String.to_integer(&1.resource_id))
-    |> Map.new(fn {config_id, grants} ->
-      latest = Enum.max_by(grants, & &1.id)
-      {config_id, latest}
-    end)
+    case engine_connect_list_grants(%{resource_type: "data_source", status: "active"}) do
+      grants when is_list(grants) ->
+        grants
+        |> Enum.filter(&(&1.resource_id in config_ids))
+        |> Enum.group_by(&String.to_integer(&1.resource_id))
+        |> Map.new(fn {config_id, cfg_grants} ->
+          latest = Enum.max_by(cfg_grants, & &1.id)
+          {config_id, latest}
+        end)
+
+      _ ->
+        %{}
+    end
   end
 
   defp grants_by_config(_, _configs), do: %{}
@@ -1440,6 +1549,9 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsLive do
 
           {:error, :not_found} ->
             Ecto.Changeset.add_error(changeset, :settings, "selected credential was not found")
+
+          _ ->
+            changeset
         end
     end
   end

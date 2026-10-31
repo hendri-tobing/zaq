@@ -14,11 +14,36 @@ defmodule ZaqWeb.Live.BO.Communication.AgentRoutingOptions do
   @doc "Fetches the incoming routing rule for `scope` via EngineDispatch and returns its select value."
   @spec scope_rule_value(map()) :: String.t()
   def scope_rule_value(scope) when is_map(scope) do
-    case EngineDispatch.dispatch(:get_incoming_message_routing_rules, %{scopes: [scope]}) do
-      {:ok, [%{rule: rule}]} -> AgentRouting.rule_select_value(rule)
-      _ -> ""
+    scope_rule_values([scope])
+    |> Map.get(scope, "")
+  end
+
+  @doc "Batch-fetches incoming routing rules for `scopes` via EngineDispatch and returns `%{scope => select_value}`."
+  @spec scope_rule_values([map()]) :: %{optional(map()) => String.t()}
+  def scope_rule_values([]), do: %{}
+
+  def scope_rule_values(scopes) when is_list(scopes) do
+    scopes
+    |> Enum.uniq()
+    |> Enum.chunk_every(100)
+    |> Enum.reduce(%{}, &merge_chunk_rule_values/2)
+  end
+
+  defp merge_chunk_rule_values(chunk, acc) do
+    case EngineDispatch.dispatch(:get_incoming_message_routing_rules, %{scopes: chunk}) do
+      {:ok, results} when is_list(results) ->
+        Enum.reduce(results, acc, &put_scope_rule_value/2)
+
+      _ ->
+        Enum.reduce(chunk, acc, &Map.put_new(&2, &1, ""))
     end
   end
+
+  defp put_scope_rule_value(%{scope: scope, rule: rule}, acc) when is_map(scope) do
+    Map.put(acc, scope, AgentRouting.rule_select_value(rule))
+  end
+
+  defp put_scope_rule_value(_, acc), do: acc
 
   @doc "Returns dropdown options with the centralized NONE choice prepended."
   @spec agent_options(module() | list()) :: [{String.t(), term()}]

@@ -71,13 +71,19 @@ defmodule ZaqWeb.Live.BO.Communication.NotificationLogsLive do
   end
 
   def handle_event("view_log", %{"id" => id}, socket) do
-    log =
-      case EngineDispatch.dispatch_confidential(:notification_logs, %{action: :get, id: id}) do
-        %{id: _} = found -> found
-        _ -> nil
-      end
+    case EngineDispatch.dispatch_confidential(:notification_logs, %{action: :get, id: id}) do
+      %{id: _} = found ->
+        {:noreply, assign(socket, :selected_log, found)}
 
-    {:noreply, assign(socket, :selected_log, log)}
+      {:error, reason} ->
+        {:noreply,
+         socket
+         |> assign(:selected_log, nil)
+         |> put_flash(:error, format_engine_error(reason))}
+
+      _ ->
+        {:noreply, assign(socket, :selected_log, nil)}
+    end
   end
 
   def handle_event("close_modal", _params, socket) do
@@ -89,7 +95,7 @@ defmodule ZaqWeb.Live.BO.Communication.NotificationLogsLive do
   # ---------------------------------------------------------------------------
 
   defp load_logs(socket) do
-    {logs, total} =
+    {logs, total, error} =
       case EngineDispatch.dispatch_confidential(
              :notification_logs,
              %{
@@ -101,12 +107,31 @@ defmodule ZaqWeb.Live.BO.Communication.NotificationLogsLive do
                ]
              }
            ) do
-        %{logs: logs, total: total} when is_list(logs) and is_integer(total) -> {logs, total}
-        _ -> {[], 0}
+        %{logs: logs, total: total} when is_list(logs) and is_integer(total) ->
+          {logs, total, nil}
+
+        {:error, reason} ->
+          {[], 0, reason}
+
+        _ ->
+          {[], 0, nil}
       end
 
     socket
     |> assign(:logs, logs)
     |> assign(:total, total)
+    |> maybe_put_engine_error_flash(error)
   end
+
+  defp maybe_put_engine_error_flash(socket, nil), do: socket
+
+  defp maybe_put_engine_error_flash(socket, reason) do
+    put_flash(socket, :error, format_engine_error(reason))
+  end
+
+  defp format_engine_error({:service_unavailable, :engine}),
+    do: "Engine service is unavailable."
+
+  defp format_engine_error(reason) when is_binary(reason), do: reason
+  defp format_engine_error(reason), do: "Failed to load notification logs: #{inspect(reason)}"
 end

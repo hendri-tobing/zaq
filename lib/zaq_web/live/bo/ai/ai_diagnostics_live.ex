@@ -140,6 +140,8 @@ defmodule ZaqWeb.Live.BO.AI.AIDiagnosticsLive do
       %Event{response: count} when is_integer(count) -> count
       _ -> nil
     end
+  rescue
+    _ -> nil
   end
 
   defp chunk_count do
@@ -147,5 +149,7 @@ defmodule ZaqWeb.Live.BO.AI.AIDiagnosticsLive do
       %Event{response: count} when is_integer(count) -> count
       _ -> nil
     end
+  rescue
+    _ -> nil
   end
 end

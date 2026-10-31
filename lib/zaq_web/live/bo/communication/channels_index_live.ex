@@ -118,13 +118,19 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsIndexLive do
   @impl true
   def mount(_params, _session, socket) do
     available = socket.assigns.service_available
-    configured_providers = if(available, do: configured_retrieval_providers(), else: MapSet.new())
+
+    {configured_providers, providers_error} =
+      if available, do: fetch_configured_retrieval_providers(), else: {MapSet.new(), nil}
+
+    {stats, stats_error} =
+      if available, do: fetch_stats(), else: {%{}, nil}
 
     {:ok,
      socket
+     |> maybe_put_engine_error_flash(providers_error || stats_error)
      |> assign(:retrieval_preview, @retrieval_preview)
      |> assign(:data_source_preview, @data_source_preview)
-     |> assign(:stats, if(available, do: compute_stats(), else: %{}))
+     |> assign(:stats, stats)
      |> assign(:configured_ingress_providers, configured_providers)
      |> assign(:ingress_statuses, %{})
      |> assign(:ingress_status_loading, ingress_status_loading(configured_providers))
@@ -351,18 +357,32 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsIndexLive do
   # --- Private ---
 
   defp compute_stats do
+    {stats, _error} = fetch_stats()
+    stats
+  end
+
+  defp fetch_stats do
     all_providers = @retrieval_providers ++ @data_source_providers ++ @notification_providers
 
-    counts =
-      EngineDispatch.dispatch(
-        :channel_config,
-        %{action: :enabled_counts_by_provider},
-        confidential: true
-      )
+    case EngineDispatch.dispatch(
+           :channel_config,
+           %{action: :enabled_counts_by_provider},
+           confidential: true
+         ) do
+      counts when is_map(counts) ->
+        stats =
+          Enum.reduce(all_providers, %{}, fn provider, acc ->
+            Map.put(acc, String.to_atom(provider), Map.get(counts, provider, 0))
+          end)
 
-    Enum.reduce(all_providers, %{}, fn provider, acc ->
-      Map.put(acc, String.to_atom(provider), Map.get(counts, provider, 0))
-    end)
+        {stats, nil}
+
+      {:error, reason} ->
+        {%{}, reason}
+
+      other ->
+        {%{}, {:unexpected_response, other}}
+    end
   end
 
   defp compute_ingress_statuses(configured_providers)
@@ -371,12 +391,14 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsIndexLive do
 
     Enum.reduce(providers, %{}, fn provider, acc ->
       configs =
-        :channel_config
-        |> EngineDispatch.dispatch(
-          %{action: :list_by_provider, provider: provider},
-          confidential: true
-        )
-        |> Enum.filter(& &1.enabled)
+        case EngineDispatch.dispatch(
+               :channel_config,
+               %{action: :list_by_provider, provider: provider},
+               confidential: true
+             ) do
+          list when is_list(list) -> Enum.filter(list, & &1.enabled)
+          _ -> []
+        end
 
       statuses = IngressStatusUI.collect(configs, &fetch_ingress_status/1)
 
@@ -435,12 +457,24 @@ defmodule ZaqWeb.Live.BO.Communication.ChannelsIndexLive do
   end
 
   defp configured_retrieval_providers do
-    :channel_config
-    |> EngineDispatch.dispatch(
-      %{action: :enabled_providers_by_kind, kind: "retrieval"},
-      confidential: true
-    )
-    |> MapSet.new()
+    {providers, _error} = fetch_configured_retrieval_providers()
+    providers
+  end
+
+  defp fetch_configured_retrieval_providers do
+    case EngineDispatch.dispatch(
+           :channel_config,
+           %{action: :enabled_providers_by_kind, kind: "retrieval"},
+           confidential: true
+         ) do
+      providers when is_list(providers) -> {MapSet.new(providers), nil}
+      {:error, reason} -> {MapSet.new(), reason}
+      other -> {MapSet.new(), {:unexpected_response, other}}
+    end
+  end
+
+  defp maybe_put_engine_error_flash(socket, reason) do
+    EngineDispatch.maybe_put_error_flash(socket, reason, "Failed to load channel configuration")
   end
 
   defp fetch_ingress_status(config) do

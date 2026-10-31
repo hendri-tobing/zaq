@@ -181,6 +181,15 @@ defmodule ZaqWeb.Live.BO.AI.AIDiagnosticsLiveTest do
     end
   end
 
+  test "rescues local query exceptions in document_count and chunk_count and renders dash fallback",
+       %{conn: conn} do
+    Zaq.Repo.query!("ALTER TABLE documents RENAME COLUMN id TO broken_id")
+    Zaq.Repo.query!("CREATE TABLE IF NOT EXISTS chunks (broken_id serial PRIMARY KEY)")
+
+    {:ok, _view, html} = live(conn, ~p"/bo/ai-diagnostics")
+    assert html =~ "—"
+  end
+
   defp assert_diagnostic_error(view, message_fragment \\ nil) do
     assert has_element?(view, "span", "✗ error")
 

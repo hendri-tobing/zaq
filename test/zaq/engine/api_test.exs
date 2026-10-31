@@ -1321,6 +1321,9 @@ defmodule Zaq.Engine.ApiTest do
     test "persists, updates, toggles, and queries channel_config records" do
       unique = System.unique_integer([:positive])
       provider = "slack"
+      user = user_fixture(%{username: "channel_config_admin_#{unique}"})
+      {:ok, user} = Zaq.Accounts.change_password(user, %{password: "StrongPass1!"})
+      actor = %{user_id: user.id}
 
       persist_insert =
         Event.new(
@@ -1338,6 +1341,7 @@ defmodule Zaq.Engine.ApiTest do
             }
           },
           :engine,
+          actor: actor,
           opts: [confidential: true]
         )
 
@@ -1403,6 +1407,7 @@ defmodule Zaq.Engine.ApiTest do
             params: %{name: "Slack Updated #{unique}"}
           },
           :engine,
+          actor: actor,
           opts: [confidential: true]
         )
 
@@ -1411,6 +1416,7 @@ defmodule Zaq.Engine.ApiTest do
 
       toggle_event =
         Event.new(%{action: :toggle_enabled!, config: updated}, :engine,
+          actor: actor,
           opts: [confidential: true]
         )
 
@@ -1419,6 +1425,10 @@ defmodule Zaq.Engine.ApiTest do
     end
 
     test "returns error changeset with stripped prepare callbacks when persist fails" do
+      unique = System.unique_integer([:positive])
+      user = user_fixture(%{username: "channel_config_err_#{unique}"})
+      {:ok, user} = Zaq.Accounts.change_password(user, %{password: "StrongPass1!"})
+
       invalid_persist =
         Event.new(
           %{
@@ -1428,11 +1438,144 @@ defmodule Zaq.Engine.ApiTest do
             params: %{provider: "web_widget", kind: "retrieval", name: ""}
           },
           :engine,
+          actor: %{user_id: user.id},
           opts: [confidential: true]
         )
 
       assert {:error, %Ecto.Changeset{valid?: false, prepare: []}} =
                Api.handle_event(invalid_persist, :channel_config, nil).response
+    end
+
+    test "rejects channel_config mutations without an authenticated BO actor" do
+      unique = System.unique_integer([:positive])
+      unactivated_user = user_fixture(%{username: "unactivated_bo_#{unique}"})
+
+      {:ok, config} =
+        %ChannelConfig{}
+        |> ChannelConfig.changeset(%{
+          name: "Slack #{unique}",
+          provider: "slack",
+          kind: "retrieval",
+          url: "https://slack.example.com",
+          token: "xoxb-#{unique}",
+          enabled: true
+        })
+        |> Repo.insert()
+
+      for bad_actor <- [nil, %{user_id: -1}, %{user_id: unactivated_user.id}] do
+        persist_event =
+          Event.new(
+            %{
+              action: :persist,
+              modal: :new,
+              config: %ChannelConfig{},
+              params: %{
+                name: "Unauthorized #{unique}",
+                provider: "slack",
+                kind: "retrieval",
+                url: "https://slack.example.com",
+                token: "xoxb-#{unique}",
+                enabled: true
+              }
+            },
+            :engine,
+            actor: bad_actor,
+            opts: [confidential: true]
+          )
+
+        assert {:error, :unauthorized} =
+                 Api.handle_event(persist_event, :channel_config, nil).response
+
+        toggle_event =
+          Event.new(%{action: :toggle_enabled!, config: config}, :engine,
+            actor: bad_actor,
+            opts: [confidential: true]
+          )
+
+        assert {:error, :unauthorized} =
+                 Api.handle_event(toggle_event, :channel_config, nil).response
+      end
+
+      assert Repo.get!(ChannelConfig, config.id).enabled == true
+    end
+
+    test "rejects email connectors in generic channel_config mutations to preserve email persistence contract" do
+      unique = System.unique_integer([:positive])
+      user = user_fixture(%{username: "email_guard_admin_#{unique}"})
+      {:ok, user} = Zaq.Accounts.change_password(user, %{password: "StrongPass1!"})
+      actor = %{user_id: user.id}
+
+      {:ok, imap_config} =
+        %ChannelConfig{}
+        |> ChannelConfig.changeset(%{
+          name: "IMAP #{unique}",
+          provider: "email:imap",
+          kind: "retrieval",
+          url: "imap://mail.example.com",
+          token: "secret-#{unique}",
+          enabled: false,
+          settings: %{
+            "server" => "mail.example.com",
+            "username" => "bot@example.com",
+            "imap" => %{"selected_mailboxes" => ["INBOX"]}
+          }
+        })
+        |> Repo.insert()
+
+      for email_provider <- ["email:imap", "email:smtp"] do
+        persist_new_email =
+          Event.new(
+            %{
+              action: :persist,
+              modal: :new,
+              config: %ChannelConfig{},
+              params: %{
+                name: "Email #{unique}",
+                provider: email_provider,
+                kind: "retrieval",
+                url: "smtp://mail.example.com",
+                enabled: true
+              }
+            },
+            :engine,
+            actor: actor,
+            opts: [confidential: true]
+          )
+
+        assert {:error, :email_connector_requires_email_settings} =
+                 Api.handle_event(persist_new_email, :channel_config, nil).response
+      end
+
+      tampered_struct = %{imap_config | provider: "slack"}
+
+      persist_tampered =
+        Event.new(
+          %{
+            action: :persist,
+            modal: :edit,
+            config: tampered_struct,
+            params: %{name: "Bypassed Email #{unique}"}
+          },
+          :engine,
+          actor: actor,
+          opts: [confidential: true]
+        )
+
+      assert {:error, :email_connector_requires_email_settings} =
+               Api.handle_event(persist_tampered, :channel_config, nil).response
+
+      toggle_email =
+        Event.new(%{action: :toggle_enabled!, config: tampered_struct}, :engine,
+          actor: actor,
+          opts: [confidential: true]
+        )
+
+      assert {:error, :email_connector_requires_email_settings} =
+               Api.handle_event(toggle_email, :channel_config, nil).response
+
+      persisted = Repo.get!(ChannelConfig, imap_config.id)
+      assert persisted.name == "IMAP #{unique}"
+      assert persisted.enabled == false
     end
 
     test "returns aggregate enabled counts and data source flags" do
